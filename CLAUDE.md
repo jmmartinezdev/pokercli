@@ -2,7 +2,7 @@
 
 ## Git workflow
 
-**Always ask the user for confirmation before running `git commit` or `git push`.** Show them the changes first and wait for explicit approval.
+**Always ask the user for confirmation before running `git commit` or `git push`.** Show them the changes first and wait for explicit approval. Push directly to `main` — no PRs.
 
 A macOS command-line tool used as a sandbox for building the card/hand logic of a Texas Hold 'em poker game. The logic developed here is intended to be reused later in the iOS, macOS, and iPadOS apps.
 
