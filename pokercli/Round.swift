@@ -36,6 +36,15 @@ actor Round {
                            : (dealerIndex + 2) % players.count
     }
 
+    private var currentBet: Int { seats.map(\.streetBet).max() ?? 0 }
+
+    private var isBettingStreet: Bool {
+        switch phase {
+        case .preFlop, .flop, .turn, .river: return true
+        case .idle, .showdown:                return false
+        }
+    }
+
     // MARK: - Init
 
     init(players: [Player], dealerIndex: Int, blinds: (small: Int, big: Int)) {
@@ -84,13 +93,14 @@ actor Round {
                               committed: 0))
         }
         seats = built
-        postBlind(seatIndex: smallBlindIndex, amount: blinds.small)
-        postBlind(seatIndex: bigBlindIndex,   amount: blinds.big)
+        seats[smallBlindIndex].placeBet(amount: blinds.small)
+        seats[bigBlindIndex].placeBet(amount: blinds.big)
         phase = .preFlop
     }
 
     func flop() {
         precondition(phase == .preFlop, "flop() requires preFlop() to have been called.")
+        closeStreet()
         deck.burn()
         let c1 = drawRequired()
         let c2 = drawRequired()
@@ -101,6 +111,7 @@ actor Round {
 
     func turn() {
         precondition(phase == .flop, "turn() requires flop() to have been called.")
+        closeStreet()
         deck.burn()
         let t = drawRequired()
         community = CommunityCards(flop: community.flop, turn: t)
@@ -109,10 +120,57 @@ actor Round {
 
     func river() {
         precondition(phase == .turn, "river() requires turn() to have been called.")
+        closeStreet()
         deck.burn()
         let r = drawRequired()
         community = CommunityCards(flop: community.flop, turn: community.turn, river: r)
         phase = .river
+    }
+
+    // MARK: - Actions
+
+    func fold(seatIndex: Int) {
+        precondition(isBettingStreet, "fold() requires an active betting street.")
+        precondition(seats.indices.contains(seatIndex), "seatIndex out of range.")
+        precondition(seats[seatIndex].status == .active, "Seat is not active.")
+        seats[seatIndex].fold()
+    }
+
+    func check(seatIndex: Int) {
+        precondition(isBettingStreet, "check() requires an active betting street.")
+        precondition(seats.indices.contains(seatIndex), "seatIndex out of range.")
+        precondition(seats[seatIndex].status == .active, "Seat is not active.")
+        precondition(seats[seatIndex].streetBet == currentBet,
+                     "Cannot check: a bet is open — call, raise, or fold.")
+    }
+
+    func call(seatIndex: Int) {
+        precondition(isBettingStreet, "call() requires an active betting street.")
+        precondition(seats.indices.contains(seatIndex), "seatIndex out of range.")
+        precondition(seats[seatIndex].status == .active, "Seat is not active.")
+        let delta = currentBet - seats[seatIndex].streetBet
+        precondition(delta > 0, "Cannot call: nothing to call — check instead.")
+        seats[seatIndex].placeBet(amount: delta)
+    }
+
+    func bet(seatIndex: Int, amount: Int) {
+        precondition(isBettingStreet, "bet() requires an active betting street.")
+        precondition(seats.indices.contains(seatIndex), "seatIndex out of range.")
+        precondition(seats[seatIndex].status == .active, "Seat is not active.")
+        precondition(currentBet == 0, "Cannot bet: a bet is already open — raise instead.")
+        precondition(amount >= blinds.big, "Bet must be at least one big blind.")
+        seats[seatIndex].placeBet(amount: amount)
+    }
+
+    func raise(seatIndex: Int, to total: Int) {
+        precondition(isBettingStreet, "raise() requires an active betting street.")
+        precondition(seats.indices.contains(seatIndex), "seatIndex out of range.")
+        precondition(seats[seatIndex].status == .active, "Seat is not active.")
+        precondition(currentBet > 0, "Cannot raise: no bet is open — bet instead.")
+        precondition(total >= 2 * currentBet, "Raise must be at least 2× the current bet.")
+        let delta = total - seats[seatIndex].streetBet
+        precondition(delta > 0, "Raise must increase this seat's street bet.")
+        seats[seatIndex].placeBet(amount: delta)
     }
 
     // MARK: - Showdown
@@ -135,6 +193,7 @@ actor Round {
 
     func award() -> [(seat: Seat, winnings: Int)] {
         precondition(phase == .river, "award() requires river() to have been dealt.")
+        closeStreet()
         let pots = sidePots()
         var perSeat: [Int: Int] = [:]
 
@@ -182,15 +241,6 @@ actor Round {
 
     private func closeStreet() {
         for i in seats.indices { seats[i].closeStreet() }
-    }
-
-    private func postBlind(seatIndex: Int, amount: Int) {
-        let chips = min(amount, seats[seatIndex].player.stack)
-        seats[seatIndex].player.stack -= chips
-        seats[seatIndex].streetBet    = chips
-        if seats[seatIndex].player.stack == 0 {
-            seats[seatIndex].status = .allIn
-        }
     }
 
     private func drawRequired() -> Card {

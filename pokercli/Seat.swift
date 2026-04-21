@@ -21,4 +21,15 @@ struct Seat {
         committed += streetBet
         streetBet = 0
     }
+
+    mutating func fold() {
+        status = .folded
+    }
+
+    mutating func placeBet(amount: Int) {
+        let chips = min(amount, player.stack)
+        player.stack -= chips
+        streetBet   += chips
+        if player.stack == 0 { status = .allIn }
+    }
 }

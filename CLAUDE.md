@@ -94,7 +94,9 @@ One type per file. `main.swift` is used as a scratchpad to exercise the latest c
 - `let hand: PlayerHand` — immutable; hole cards don't change mid-hand.
 - `var streetBet: Int` — chips bet on the current street; answers "what does it cost to call?". Reset to 0 by `closeStreet()`.
 - `var committed: Int` — total chips put into the pot across all streets this hand; drives side-pot math and award.
-- `mutating func closeStreet()` — folds `streetBet` into `committed` and resets it. Called at end of each betting street (not yet wired to dealing methods — betting actions are not yet built).
+- `mutating func closeStreet()` — folds `streetBet` into `committed` and resets it. Called by `Round` at the top of each dealing method (`flop`/`turn`/`river`) and at the top of `award()`.
+- `mutating func fold()` — sets `status = .folded`. No chip movement.
+- `mutating func placeBet(amount: Int)` — low-level chip mutator: caps at `player.stack`, decrements the stack, **adds** to `streetBet` (delta semantics), and promotes to `.allIn` if the stack hits 0. Used by `Round` for blinds and for every `call` / `bet` / `raise` action — the calling layer computes the delta; `Seat` itself knows nothing about `currentBet` or street state.
 - Replaces `Round.playerHands: [PlayerHand]` as the round-scoped player record.
 
 ### `SidePot` — [SidePot.swift](pokercli/SidePot.swift)
@@ -111,12 +113,16 @@ One type per file. `main.swift` is used as a scratchpad to exercise the latest c
 - `let dealerIndex: Int` and `let blinds: (small: Int, big: Int)` — round-scoped button position and stake levels. `let` + `Sendable` means nonisolated (callers don't need `await` to read them).
 - `var potTotal: Int` — computed: sum of all `seat.committed + seat.streetBet`. Display value; not the source of truth.
 - `var smallBlindIndex` / `var bigBlindIndex` — computed from `dealerIndex`. Heads-up (2 players): dealer posts the small blind, non-dealer the big. 3+ players: `dealerIndex + 1` / `dealerIndex + 2` (mod `count`).
-- `preFlop()` shuffles the deck, builds `seats` (status `.active`, `streetBet`/`committed` both 0), then posts blinds via `postBlind`.
-- `flop()`, `turn()`, `river()` each burn one card then deal the street's community cards.
+- `preFlop()` shuffles the deck, builds `seats` (status `.active`, `streetBet`/`committed` both 0), then posts blinds by calling `seats[i].placeBet(amount:)` directly — no helper needed; `placeBet` handles the `.allIn` promotion if a player can't cover.
+- `flop()`, `turn()`, `river()` each call `closeStreet()` first (folding the previous street's bets into `committed`), then burn one card and deal the new street. `award()` also calls `closeStreet()` before computing pots.
+- **Betting actions** — `fold(seatIndex:)`, `check(seatIndex:)`, `call(seatIndex:)`, `bet(seatIndex:amount:)`, `raise(seatIndex:to total:)`. All require `phase ∈ {.preFlop, .flop, .turn, .river}` and an `.active` seat; illegal inputs trip a `precondition`. `Round` owns all cross-seat logic (current bet level, min-bet/min-raise validation, delta computation) and delegates the actual chip movement to `Seat.placeBet(amount:)`. `bet` and `raise` take the *total* `streetBet` target the player wants to reach, not the delta — matching how poker UIs and rule language talk about bet sizing.
+- Min-bet is one big blind; min-raise is `2 × currentBet`. This is a simplification — real poker's min-raise rule is "previous raise size", which requires tracking the last raise increment. Revisit when that becomes load-bearing.
+- `private var currentBet: Int` — max `streetBet` across all seats, or 0 if nobody has bet this street. Drives `check`/`call`/`bet`/`raise` validation.
+- `private var isBettingStreet: Bool` — guards all betting actions against `.idle` and `.showdown`.
 - `func sidePots() -> [SidePot]` — derives main and side pots from per-seat `committed` values.
-- `func award() -> [(seat: Seat, winnings: Int)]` — precondition: `phase == .river`. Evaluates each eligible seat's best hand via `HandEvaluator`, awards each `SidePot`, credits `seat.player.stack`, sets `phase = .showdown`. Odd chip goes to the first tied winner clockwise from the dealer.
-- `private func closeStreet()` — calls `seat.closeStreet()` on all seats. Hook for when betting actions are added.
-- `private func postBlind(seatIndex:amount:)` — decrements `player.stack`, sets `streetBet`, and promotes to `.allIn` if the player can't cover the blind (posts `min(amount, stack)`). Blinds live in `streetBet` during preflop; `closeStreet()` folds them into `committed` when preflop betting ends.
+- `func award() -> [(seat: Seat, winnings: Int)]` — precondition: `phase == .river`. Calls `closeStreet()`, evaluates each eligible seat's best hand via `HandEvaluator`, awards each `SidePot`, credits `seat.player.stack`, sets `phase = .showdown`. Odd chip goes to the first tied winner clockwise from the dealer.
+- `private func closeStreet()` — calls `seat.closeStreet()` on all seats.
+- Action turn order is **not** enforced yet — `Round` will accept actions in any order as long as preconditions hold. Turn-order / action-pointer logic belongs to a later layer (probably `Game` or a dedicated `BettingRound`).
 - All methods are synchronous (no `async`) — deck/seat access is local struct mutation. Callers outside the actor still need `await` for the isolation hop.
 - Private `drawRequired() -> Card` crashes on an empty deck — running out of cards mid-round is a programming error.
 
@@ -142,8 +148,9 @@ One type per file. `main.swift` is used as a scratchpad to exercise the latest c
 
 ## Likely next steps (not yet built)
 
-- **Betting actions** (`bet`, `call`, `raise`, `fold`, `check`) — `Seat.streetBet` / `committed` fields exist; blinds are the only thing that increments them so far. Wire `Round.closeStreet()` to the end of each betting street.
-- **All-in auto-promotion for voluntary bets** — `postBlind` already promotes to `.allIn` when a blind can't be covered; the betting layer needs the same behaviour for `call`/`raise`.
+- **Action turn order** — `Round` currently accepts actions in any order. Need an action pointer (first to act per street, advancing around the table, skipping folded/all-in seats) plus a "betting round closed" detector (action returns to the last aggressor, or checks around).
+- **Proper min-raise rule** — currently `2 × currentBet`; standard poker uses "size of the previous raise". Requires tracking `lastRaiseSize` per street.
+- **Partial all-in raises** — when a player goes all-in for less than a full min-raise, action should not re-open for players who already acted. Needs turn-order first.
 - **`Game` entity** — owns `[Player]` across rounds, creates a fresh `Round` each hand, transfers updated stacks back to players after `award()`.
 - Returning the winning 5-card combination alongside the `HandRank` from `HandEvaluator.evaluate` — currently only the rank is returned, not which cards produced it.
 - Partial-board hand strength / equity (different problem from `HandEvaluator`, which requires a complete board).
